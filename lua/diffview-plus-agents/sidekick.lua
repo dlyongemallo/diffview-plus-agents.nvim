@@ -254,9 +254,12 @@ function M.setup(opts)
   })
   -- Also catch externally-discovered sessions (agents started directly in
   -- a bare tmux pane): sidekick does not emit `SidekickCli*` for those,
-  -- so hook `FocusGained` on the overview buffer as a cheap heartbeat.
-  -- `pattern` matches the view's filetype, so this never fires elsewhere.
-  vim.api.nvim_create_autocmd("FocusGained", {
+  -- so refresh whenever the user returns to the overview. `FocusGained`
+  -- covers "switched away from nvim and back" (requires tmux `set -g
+  -- focus-events on`), and `BufEnter` covers "switched tabs/windows
+  -- inside nvim" (works regardless of terminal/tmux cooperation).
+  -- The filetype guard means this never fires on unrelated buffers.
+  vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
     group = group,
     callback = function()
       if vim.bo.filetype == "DiffviewWorktreeOverview" then
