@@ -8,10 +8,11 @@ M.DEFAULTS = {
   glyph = "●",
 }
 
----How long a cached `State.get` result is reused. A worktree overview
----renders every row in a single Lua pass that finishes well under this
----budget, so N rows share one tmux-scan instead of triggering N; the
----cache then expires in time for the next overview open.
+---How long a cached `State.get` result is reused, measured from the
+---scan's completion. A worktree overview renders every row in a single
+---Lua pass that finishes well under this budget, so N rows share one
+---tmux-scan instead of triggering N; the cache then expires in time for
+---the next overview open.
 local STATE_TTL_MS = 500
 
 ---@type table[]?
@@ -22,17 +23,19 @@ local _cache_stamp_ms = 0
 ---Return sidekick's current session list, served from a short-lived
 ---cache. `State.get({})` scans tmux panes via `/proc` + `lsof` and is
 ---expensive per call; without the cache a 20-worktree overview triggered
----20 full scans back-to-back.
+---20 full scans back-to-back. The stamp is taken AFTER the scan returns,
+---not before: on a loaded system a scan can outlast its own TTL window,
+---and stamping before would mark the just-populated cache as already
+---expired, defeating the cache for every subsequent row.
 ---@return table[]?
 local function get_states()
   local ok, State = pcall(require, "sidekick.cli.state")
   if not ok or type(State) ~= "table" or type(State.get) ~= "function" then
     return nil
   end
-  local now = vim.uv.now()
-  if _cache_states == nil or (now - _cache_stamp_ms) > STATE_TTL_MS then
+  if _cache_states == nil or (vim.uv.now() - _cache_stamp_ms) > STATE_TTL_MS then
     _cache_states = State.get({}) or {}
-    _cache_stamp_ms = now
+    _cache_stamp_ms = vim.uv.now()
   end
   return _cache_states
 end
@@ -80,16 +83,26 @@ function M.setup(opts)
 
     local target = normalize(entry.path)
 
+    -- Collect every distinct tool whose session matches this worktree.
+    -- Many developers run several agents side by side in one project
+    -- (e.g., Claude for code, Codex for scaffolding), so collapsing to
+    -- the first match hides state the user wants to see. Dedupe by
+    -- name so a tool with several panes still renders once.
+    local parts = {}
+    local seen = {}
     for _, s in ipairs(states) do
       if s.session and s.session.cwd == target then
         local tool = s.tool
-        if tool and tool.name then
-          return cfg.glyph .. tool.name
+        if tool and tool.name and not seen[tool.name] then
+          seen[tool.name] = true
+          parts[#parts + 1] = cfg.glyph .. tool.name
         end
       end
     end
-
-    return nil
+    if #parts == 0 then
+      return nil
+    end
+    return table.concat(parts, " ")
   end
 end
 

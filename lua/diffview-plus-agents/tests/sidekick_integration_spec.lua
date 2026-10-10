@@ -7,7 +7,7 @@ local function reset()
   recorded = { opened = {}, toggled = {}, sent = {}, tmux_cmds = {} }
   emitter_subs = {}
   for _, m in ipairs({
-    "diffview-plus-coding-agents.sidekick",
+    "diffview-plus-agents.sidekick",
     "sidekick.cli",
     "sidekick.cli.state",
     "diffview.lib",
@@ -115,7 +115,7 @@ local function tmux_session(tool, cwd, pane_id, mux_session)
   }
 end
 
-describe("diffview-plus-coding-agents.sidekick integration", function()
+describe("diffview-plus-agents.sidekick integration", function()
   before_each(function()
     reset()
     stub_global_emitter()
@@ -127,7 +127,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
   describe("show_on_enter", function()
     it("opens sidekick's float for a terminal-backed session on `<CR>`", function()
       stub_sidekick_state({ terminal_session("claude", "/my/wt", "sid-1") })
-      require("diffview-plus-coding-agents.sidekick").setup({})
+      require("diffview-plus-agents.sidekick").setup({})
 
       DiffviewGlobal.emitter:emit("worktree_overview_entered", nil, { path = "/my/wt" })
 
@@ -138,7 +138,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
 
     it("stays silent when no session matches, instead of popping a picker", function()
       stub_sidekick_state({})
-      require("diffview-plus-coding-agents.sidekick").setup({})
+      require("diffview-plus-agents.sidekick").setup({})
 
       DiffviewGlobal.emitter:emit("worktree_overview_entered", nil, { path = "/no/match" })
 
@@ -150,7 +150,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
       -- not have tmux jump to the agent's pane out from under them.
       stub_sidekick_state({ tmux_session("claude", "/my/wt") })
       stub_tmux_system()
-      require("diffview-plus-coding-agents.sidekick").setup({})
+      require("diffview-plus-agents.sidekick").setup({})
 
       DiffviewGlobal.emitter:emit("worktree_overview_entered", nil, { path = "/my/wt" })
 
@@ -160,7 +160,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
 
     it("skips the subscription entirely when show_on_enter = false", function()
       stub_sidekick_state({ terminal_session("claude", "/my/wt", "sid-1") })
-      require("diffview-plus-coding-agents.sidekick").setup({ show_on_enter = false })
+      require("diffview-plus-agents.sidekick").setup({ show_on_enter = false })
 
       DiffviewGlobal.emitter:emit("worktree_overview_entered", nil, { path = "/my/wt" })
 
@@ -176,7 +176,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
         terminal_session("claude", "/my/wt", "sid-A"),
         terminal_session("codex", "/my/wt", "sid-B"),
       })
-      require("diffview-plus-coding-agents.sidekick").setup({})
+      require("diffview-plus-agents.sidekick").setup({})
 
       DiffviewGlobal.emitter:emit("worktree_overview_entered", nil, { path = "/my/wt" })
 
@@ -192,7 +192,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
     -- the integration module's effects are consistent across re-setup.
     it("detaches the previous handler on each setup call", function()
       stub_sidekick_state({ terminal_session("claude", "/my/wt", "sid-1") })
-      local sidekick = require("diffview-plus-coding-agents.sidekick")
+      local sidekick = require("diffview-plus-agents.sidekick")
 
       sidekick.setup({})
       sidekick.setup({})
@@ -206,7 +206,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
 
     it("cleanup() removes the subscription", function()
       stub_sidekick_state({ terminal_session("claude", "/my/wt", "sid-1") })
-      local sidekick = require("diffview-plus-coding-agents.sidekick")
+      local sidekick = require("diffview-plus-agents.sidekick")
 
       sidekick.setup({})
       sidekick.cleanup()
@@ -220,7 +220,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
   describe("keymaps", function()
     it("installs the focus and send keymaps at their default lhs", function()
       stub_sidekick_state({})
-      require("diffview-plus-coding-agents.sidekick").setup({})
+      require("diffview-plus-agents.sidekick").setup({})
 
       assert.is_not_nil(vim.fn.maparg("<leader>aw", "n", false, true).lhs)
       assert.is_not_nil(vim.fn.maparg("<leader>av", "x", false, true).lhs)
@@ -230,7 +230,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
       stub_sidekick_state({})
       pcall(vim.keymap.del, "x", "<leader>av")
 
-      require("diffview-plus-coding-agents.sidekick").setup({
+      require("diffview-plus-agents.sidekick").setup({
         focus_keymap = "<leader>XW",
         send_keymap = false,
       })
@@ -244,7 +244,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
       -- iterating on config) leaves the old lhs bound to a stale closure
       -- that still calls into sidekick for the previous worktree logic.
       stub_sidekick_state({})
-      local sidekick = require("diffview-plus-coding-agents.sidekick")
+      local sidekick = require("diffview-plus-agents.sidekick")
 
       sidekick.setup({ focus_keymap = "<leader>k1", send_keymap = "<leader>k2" })
       assert.is_not_nil(vim.fn.maparg("<leader>k1", "n", false, true).lhs)
@@ -267,7 +267,7 @@ describe("diffview-plus-coding-agents.sidekick integration", function()
       -- has rebound the key between `setup` and `cleanup`, blindly
       -- deleting would destroy a binding that is no longer ours.
       stub_sidekick_state({})
-      local sidekick = require("diffview-plus-coding-agents.sidekick")
+      local sidekick = require("diffview-plus-agents.sidekick")
 
       sidekick.setup({ focus_keymap = "<leader>k5", send_keymap = false })
       local user_rhs = function() end

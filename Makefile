@@ -1,11 +1,11 @@
-TEST_PATH := $(if $(TEST_PATH),$(TEST_PATH),lua/diffview-plus-coding-agents/tests/)
+TEST_PATH := $(if $(TEST_PATH),$(TEST_PATH),lua/diffview-plus-agents/tests/)
 export TEST_PATH
 
 # Run the test suite:
 #   make test
 #
 # Or a single spec:
-#   TEST_PATH=lua/diffview-plus-coding-agents/tests/claude_provider_spec.lua make test
+#   TEST_PATH=lua/diffview-plus-agents/tests/sidekick_provider_spec.lua make test
 #
 # Plenary is fetched on first run into .tests/site/pack/deps/start/.
 .PHONY: test
