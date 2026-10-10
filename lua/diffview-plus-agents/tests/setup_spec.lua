@@ -53,10 +53,12 @@ local function stub_overview()
 end
 
 ---Make `DiffviewGlobal.emitter` a stub so the integration module can
----`on`/`off` without reaching real diffview. Returns a table the tests
----can inspect to verify the subscription was installed and removed.
+---`on`/`off` without reaching real diffview. Returns `subs` (so tests
+---can assert what was subscribed to) and `emits` (a flat list of every
+---event name the module tried to emit, in order).
 local function stub_emitter()
   local subs = {}
+  local emits = {}
   _G.DiffviewGlobal = _G.DiffviewGlobal or {}
   _G.DiffviewGlobal.emitter = {
     on = function(_, event, fn)
@@ -71,9 +73,11 @@ local function stub_emitter()
         end
       end
     end,
-    emit = function() end,
+    emit = function(_, event)
+      emits[#emits + 1] = event
+    end,
   }
-  return subs
+  return subs, emits
 end
 
 local function unstub()
@@ -164,5 +168,61 @@ describe("diffview-plus-agents setup", function()
 
     require("diffview-plus-agents").setup({})
     assert.equals(0, #registered)
+  end)
+
+  it("emits `refresh_worktree_overview_status` on `SidekickCliAttach`", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local invalidated = false
+    package.loaded["diffview-plus-agents.providers.sidekick"] = {
+      setup = function()
+        return function(_, done)
+          done(nil)
+        end
+      end,
+      _invalidate_cache = function()
+        invalidated = true
+      end,
+    }
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+
+    -- The autocmd lives on the real `vim.api`; fire the event the way
+    -- sidekick does and assert the integration reacted.
+    vim.api.nvim_exec_autocmds("User", { pattern = "SidekickCliAttach" })
+
+    assert.is_true(invalidated)
+    local saw
+    for _, e in ipairs(emits) do
+      if e == "refresh_worktree_overview_status" then
+        saw = true
+        break
+      end
+    end
+    assert.is_true(saw)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("tears down the SidekickCli autocmd when `sidekick` is dropped on reload", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    package.loaded["diffview-plus-agents.providers.sidekick"] = {
+      setup = function()
+        return function(_, done)
+          done(nil)
+        end
+      end,
+      _invalidate_cache = function() end,
+    }
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    require("diffview-plus-agents").setup({})
+
+    local before = #emits
+    vim.api.nvim_exec_autocmds("User", { pattern = "SidekickCliDetach" })
+    assert.equals(before, #emits)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
   end)
 end)
