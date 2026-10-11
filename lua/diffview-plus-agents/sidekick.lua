@@ -273,11 +273,29 @@ function M.setup(opts)
   -- a terminal whose window the user leaves open. Hook `TermClose`
   -- on sidekick's terminal buffers directly so our refresh fires the
   -- moment the agent exits, independent of sidekick's own cleanup.
+  -- Only applies when sidekick runs the agent in an nvim terminal
+  -- (default `mux.create = "terminal"`). With `mux.create = "window"`
+  -- there is no nvim terminal buffer and this never fires.
   vim.api.nvim_create_autocmd("TermClose", {
     group = group,
     pattern = "*",
     callback = function(args)
       if vim.bo[args.buf].filetype == "sidekick_terminal" then
+        request_status_refresh()
+      end
+    end,
+  })
+  -- `CursorHold` is the fallback for configurations where the agent
+  -- runs in a bare tmux pane (sidekick `mux.create = "window"` or an
+  -- externally-launched agent). Those paths do not emit any
+  -- nvim-visible event when the agent exits, so autoupdate relies on
+  -- the user eventually looking at the overview. After `updatetime`
+  -- milliseconds of idle on the overview buffer, the status column
+  -- re-queries. Only one scan per idle period, so overhead is modest.
+  vim.api.nvim_create_autocmd("CursorHold", {
+    group = group,
+    callback = function()
+      if vim.bo.filetype == "DiffviewWorktreeOverview" then
         request_status_refresh()
       end
     end,
