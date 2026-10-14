@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  commit-style:
+    runs-on: ubuntu-latest
+    name: Conventional commits
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Skip GitHub's synthetic merge commit (would fail `cz check`).
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install commitizen
+        run: pip install commitizen
+
+      - name: Lint commits
+        run: |
+          range="origin/${{ github.base_ref }}..HEAD"
+          if [ -z "$(git rev-list "$range")" ]; then
+            echo "No new commits vs base; skipping cz check."
+            exit 0
+          fi
+          cz check --rev-range "$range"
+
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint (stylua)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache stylua binary
+        id: cache-stylua
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/stylua
+          key: stylua-2.4.1-luajit-linux-x86_64
+
+      - name: Install stylua (luajit feature)
+        if: steps.cache-stylua.outputs.cache-hit != 'true'
+        run: cargo install stylua --locked --version 2.4.1 --features luajit
+
+      - name: Check formatting
+        run: stylua --check lua/ scripts/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0.10 is the lowest version the README supports; the rest give
+        # forward-compat coverage on current and upcoming Neovim.
+        neovim: [v0.10.4, v0.11.6, stable, nightly]
+    name: Test (Neovim ${{ matrix.neovim }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim }}
+
+      - name: Run tests
+        # Keep nightly as an early-warning signal but don't let it block PRs.
+        continue-on-error: ${{ matrix.neovim == 'nightly' }}
+        run: make test
