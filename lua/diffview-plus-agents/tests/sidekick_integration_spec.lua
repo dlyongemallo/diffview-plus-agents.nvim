@@ -261,6 +261,65 @@ describe("diffview-plus-agents.sidekick integration", function()
       assert.same({}, vim.fn.maparg("<leader>k4", "x", false, true))
     end)
 
+    it("tmux-focuses the attached session on SidekickCliAttach for a tmux backend", function()
+      -- `mux.create = "window"` / `"split"` launch the agent in a
+      -- backgrounded tmux window (`-d`), and sidekick's own `focus =
+      -- true` is silently skipped because its focus path short-circuits
+      -- when `state.terminal` is nil (which it is for every tmux
+      -- backend). The integration bridges that: on the attach event we
+      -- look up the session and `tmux select-pane` to it, so the user
+      -- actually ends up at the agent after `<leader>as` et al.
+      stub_sidekick_state({ tmux_session("agy", "/my/wt", "%42", "my-session") })
+      stub_tmux_system()
+      require("diffview-plus-agents.sidekick").setup({})
+
+      vim.api.nvim_exec_autocmds("User", {
+        pattern = "SidekickCliAttach",
+        data = { id = "tmux %42" },
+      })
+
+      -- The focus_session helper issues switch-client, select-window,
+      -- and select-pane in that order; verify at least one tmux call
+      -- hit select-pane with the attached pane id.
+      local saw_select_pane
+      for _, cmd in ipairs(recorded.tmux_cmds) do
+        if cmd[2] == "select-pane" and cmd[4] == "%42" then
+          saw_select_pane = true
+          break
+        end
+      end
+      assert.is_true(saw_select_pane)
+    end)
+
+    it("does nothing on SidekickCliAttach for a terminal backend", function()
+      -- Terminal-backed sessions were already focused by sidekick
+      -- itself (its native `focus = true` works for `state.terminal`
+      -- backends). A second tmux-switch would be noise.
+      stub_sidekick_state({ terminal_session("claude", "/my/wt", "sid-1") })
+      stub_tmux_system()
+      require("diffview-plus-agents.sidekick").setup({})
+
+      vim.api.nvim_exec_autocmds("User", {
+        pattern = "SidekickCliAttach",
+        data = { id = "sid-1" },
+      })
+
+      assert.equals(0, #recorded.tmux_cmds)
+    end)
+
+    it("honours follow_attach = false by skipping the tmux-focus", function()
+      stub_sidekick_state({ tmux_session("agy", "/my/wt", "%42", "my-session") })
+      stub_tmux_system()
+      require("diffview-plus-agents.sidekick").setup({ follow_attach = false })
+
+      vim.api.nvim_exec_autocmds("User", {
+        pattern = "SidekickCliAttach",
+        data = { id = "tmux %42" },
+      })
+
+      assert.equals(0, #recorded.tmux_cmds)
+    end)
+
     it("leaves a mapping alone if someone rebound it after setup", function()
       -- `cleanup` should only unbind lhs that still points at the exact
       -- callback this module installed. If another plugin (or the user)

@@ -11,6 +11,7 @@ end
 ---@field focus_keymap string|false # Normal-mode key that focuses the agent attached to the worktree the user is on (overview row or DiffView tab). For sidekick-launched sessions this shows the float; for sessions discovered in bare tmux panes it `tmux select-window`s to the agent's pane. Set to `false` to skip the mapping.
 ---@field send_keymap string|false # Visual-mode key that sends the current selection to the agent attached to the DiffView's worktree. Set to `false` to skip the mapping.
 ---@field sync_tab_cwd boolean # Keep the overview tab's working directory synced to the worktree under the cursor so sidekick's launch commands (`<leader>as`, `<leader>a<tool>`) attach the new agent to the right worktree. Sidekick reads `vim.fn.getcwd(0)` at `Session.new` time; without this it would pick up whatever directory the overview was opened from.
+---@field follow_attach boolean # On `SidekickCliAttach` for a tmux-backed session (`mux.create = "window"` or `"split"`), `tmux select-pane` to the new pane so the user ends up at the agent after `<leader>as`/`<leader>aa`. For terminal-backed sessions this is a no-op (sidekick's own `focus = true` already handles those).
 
 ---@type DiffviewPlusAgents.Sidekick.Config
 M.DEFAULTS = {
@@ -18,6 +19,7 @@ M.DEFAULTS = {
   focus_keymap = "<leader>aw",
   send_keymap = "<leader>av",
   sync_tab_cwd = true,
+  follow_attach = true,
 }
 
 ---Return every sidekick session whose `cwd` matches `path`. Callers can
@@ -289,10 +291,43 @@ function M.setup(opts)
 
   local group = vim.api.nvim_create_augroup(_au_group, { clear = true })
 
-  -- Hard events.
+  -- Hard events. Attach is split from detach because an attach also
+  -- triggers the "follow a tmux-backed session into its pane" fix for
+  -- `mux.create = "window"` / `"split"`, where sidekick's own
+  -- `focus = true` is a no-op (its focus path short-circuits unless
+  -- `state.terminal` is non-nil, which only ever is for terminal-backed
+  -- sessions). Without this, `<leader>as` or `<leader>a<tool>` launches
+  -- the agent in a backgrounded tmux window (`-d`) and leaves the user
+  -- in nvim. The handler looks up the attached session by its emitted
+  -- `id`, and only acts for a tmux backend -- terminal attaches have
+  -- already been focused by sidekick itself.
   vim.api.nvim_create_autocmd("User", {
     group = group,
-    pattern = { "SidekickCliAttach", "SidekickCliDetach" },
+    pattern = "SidekickCliAttach",
+    callback = function(args)
+      invalidate_and_refresh()
+      if not cfg.follow_attach then
+        return
+      end
+      local id = args and args.data and args.data.id
+      if not id then
+        return
+      end
+      local ok, State = pcall(require, "sidekick.cli.state")
+      if not ok then
+        return
+      end
+      for _, s in ipairs(State.get({ session = id }) or {}) do
+        if s.session and s.session.backend == "tmux" then
+          focus_session(s, true)
+          return
+        end
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = "SidekickCliDetach",
     callback = invalidate_and_refresh,
   })
   -- `TermClose` fires only for `mux.create = "terminal"` (sidekick
