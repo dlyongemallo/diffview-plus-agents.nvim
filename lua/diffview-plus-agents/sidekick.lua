@@ -170,6 +170,12 @@ end
 ---@type (fun(_, view, entry: GitAdapter.WorktreeEntry))?
 local _on_entered
 
+---Autocmd group backing the sidekick-event hooks (`SidekickCliAttach` /
+---`SidekickCliDetach`) and the overview `FocusGained` trigger. Keyed by
+---name so `cleanup` can clear it wholesale without tracking individual
+---autocmd ids.
+local _au_group = "diffview-plus-agents.sidekick"
+
 ---Mappings this module installed, each as `{ mode, lhs, callback }`.
 ---`callback` is the exact function we handed to `vim.keymap.set`; we
 ---compare the live mapping against it on cleanup so we only ever remove
@@ -187,6 +193,7 @@ function M.cleanup()
     DiffviewGlobal.emitter:off(_on_entered, "worktree_overview_entered")
     _on_entered = nil
   end
+  pcall(vim.api.nvim_del_augroup_by_name, _au_group)
   for _, m in ipairs(_mappings) do
     local mode, lhs, callback = m[1], m[2], m[3]
     local current = vim.fn.maparg(lhs, mode, false, true)
@@ -225,6 +232,38 @@ function M.setup(opts)
     end
     DiffviewGlobal.emitter:on("worktree_overview_entered", _on_entered)
   end
+
+  -- Ask the overview to re-score the status column whenever sidekick
+  -- gains or loses a session. The emitted event triggers the view's
+  -- `refresh_status` (status providers only, no git), so a user hitting
+  -- `<leader>aa` to attach a tool sees the row light up without having
+  -- to press `R`. The cache invalidation forces the first provider call
+  -- to do a fresh `State.get` scan; otherwise it would read the stale
+  -- cached list that predates the attach/detach.
+  local function request_status_refresh()
+    require("diffview-plus-agents.providers.sidekick")._invalidate_cache()
+    pcall(function()
+      DiffviewGlobal.emitter:emit("refresh_worktree_overview_status")
+    end)
+  end
+  local group = vim.api.nvim_create_augroup(_au_group, { clear = true })
+  vim.api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = { "SidekickCliAttach", "SidekickCliDetach" },
+    callback = request_status_refresh,
+  })
+  -- Also catch externally-discovered sessions (agents started directly in
+  -- a bare tmux pane): sidekick does not emit `SidekickCli*` for those,
+  -- so hook `FocusGained` on the overview buffer as a cheap heartbeat.
+  -- `pattern` matches the view's filetype, so this never fires elsewhere.
+  vim.api.nvim_create_autocmd("FocusGained", {
+    group = group,
+    callback = function()
+      if vim.bo.filetype == "DiffviewWorktreeOverview" then
+        request_status_refresh()
+      end
+    end,
+  })
 
   if cfg.focus_keymap then
     install_keymap("n", cfg.focus_keymap, function()
