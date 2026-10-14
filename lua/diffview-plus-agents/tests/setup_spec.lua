@@ -85,11 +85,24 @@ local function unstub()
 end
 
 describe("diffview-plus-agents setup", function()
-  before_each(reset_modules)
-  after_each(unstub)
+  local original_loaded_flag
+  before_each(function()
+    reset_modules()
+    -- Simulate diffview-plus having completed its own `plugin/diffview.lua`
+    -- bootstrap. The two "not loaded" tests below clear this inside their
+    -- bodies to exercise the error path.
+    original_loaded_flag = vim.g.diffview_nvim_loaded
+    vim.g.diffview_nvim_loaded = 1
+  end)
+  after_each(function()
+    unstub()
+    vim.g.diffview_nvim_loaded = original_loaded_flag
+  end)
 
   it("errors (does not crash) when diffview-plus is not loaded", function()
     -- Not stubbing the overview module simulates diffview+ being absent.
+    -- Clear the readiness flag the fixture set so the guard trips.
+    vim.g.diffview_nvim_loaded = nil
     local notified
     local original = vim.notify
     vim.notify = function(msg, level, opts)
@@ -103,6 +116,28 @@ describe("diffview-plus-agents setup", function()
     -- Plugin name goes in the `title` (shown by notify UIs like
     -- `rcarriga/nvim-notify`); the message is the actual error.
     assert.equals("diffview+agents", notified.opts and notified.opts.title)
+    assert.is_truthy(notified.msg:find("diffview-plus.nvim", 1, true))
+  end)
+
+  it("errors when the overview module is reachable but diffview-plus is not loaded", function()
+    -- Regression: a lazy-loaded diffview-plus whose `plugin/diffview.lua`
+    -- has not been sourced yet still has its modules on `runtimepath`, so
+    -- `pcall(require, ...)` succeeds. Without the `vim.g` guard, `setup`
+    -- would then run against uninitialised diffview state. Stub the
+    -- overview module AND clear the flag to simulate that race.
+    stub_overview()
+    stub_emitter()
+    vim.g.diffview_nvim_loaded = nil
+    local notified
+    local original_notify = vim.notify
+    vim.notify = function(msg, level, opts)
+      notified = { msg = msg, level = level, opts = opts }
+    end
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    vim.notify = original_notify
+
+    assert.is_not_nil(notified)
+    assert.equals(vim.log.levels.ERROR, notified.level)
     assert.is_truthy(notified.msg:find("diffview-plus.nvim", 1, true))
   end)
 
