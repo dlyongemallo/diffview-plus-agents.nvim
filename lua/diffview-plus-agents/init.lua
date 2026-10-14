@@ -28,6 +28,18 @@ M._status_provider = nil
 function M.setup(opts)
   opts = opts or {}
 
+  -- Verify diffview-plus has actually been loaded, not just that its
+  -- modules are reachable on `runtimepath`. A lazy-loaded diffview whose
+  -- `plugin/diffview.lua` has not been sourced yet would still satisfy
+  -- `pcall(require, ...)` while leaving `DiffviewGlobal` and the command
+  -- registry uninitialised; the overview module requires both. The
+  -- upstream entry point sets `vim.g.diffview_nvim_loaded` as the last
+  -- step of its bootstrap, so a truthy flag is the public readiness
+  -- signal.
+  if not vim.g.diffview_nvim_loaded then
+    notify("diffview-plus.nvim must be installed and loaded first", vim.log.levels.ERROR)
+    return
+  end
   local ok, overview =
     pcall(require, "diffview.scene.views.worktree_overview.worktree_overview_view")
   if not ok then
