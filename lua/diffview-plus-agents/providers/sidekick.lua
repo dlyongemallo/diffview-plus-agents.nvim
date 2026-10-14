@@ -57,28 +57,35 @@ local function normalize(path)
 end
 
 ---Build a status function that queries sidekick's full session list and
----returns `<glyph><tool-name>` for the first session matching the entry's
----path. "Full" means both sidekick-attached sessions and external ones
----sidekick's tmux/zellij backends have discovered via `/proc` + `lsof`
----process scanning, so an agent you launched directly in a tmux pane
----(without going through sidekick's toggle UI) still lights up the status
----column.
+---hands `done` a `<glyph><tool-name>` string for the first session matching
+---the entry's path. "Full" means both sidekick-attached sessions and
+---external ones sidekick's tmux/zellij backends have discovered via `/proc`
+---+ `lsof` process scanning, so an agent you launched directly in a tmux
+---pane (without going through sidekick's toggle UI) still lights up the
+---status column.
 ---
 ---When sidekick is not installed (or the state module cannot be loaded),
----the provider is silently inert.
+---the provider is silently inert (hands `done(nil)`).
+---
+---`State.get` is still a synchronous shell-out today, so `done` is called
+---inline rather than from a libuv worker. Satisfying the overview's new
+---`fun(entry, done)` contract keeps the signature right for the day the
+---provider grows a true off-main-loop scan.
 ---@param opts? SidekickProviderConfig|table
----@return fun(entry: GitAdapter.WorktreeEntry): string?
+---@return fun(entry: GitAdapter.WorktreeEntry, done: fun(result: string?))
 function M.setup(opts)
   local cfg = vim.tbl_deep_extend("force", M.DEFAULTS, opts or {})
 
-  return function(entry)
+  return function(entry, done)
     if not entry or not entry.path or entry.path == "" then
-      return nil
+      done(nil)
+      return
     end
 
     local states = get_states()
     if not states then
-      return nil
+      done(nil)
+      return
     end
 
     local target = normalize(entry.path)
@@ -87,22 +94,36 @@ function M.setup(opts)
     -- Many developers run several agents side by side in one project
     -- (e.g., Claude for code, Codex for scaffolding), so collapsing to
     -- the first match hides state the user wants to see. Dedupe by
-    -- name so a tool with several panes still renders once.
+    -- name so a tool with several panes still renders once. Filter
+    -- out dead sessions explicitly: when the user is still focused in
+    -- a sidekick float at the moment the agent process exits,
+    -- sidekick's own close logic is suppressed (its `atime`-based
+    -- debounce treats the exit as "closed too quickly"), so the
+    -- terminal lingers in `M.terminals` and keeps showing up in
+    -- `State.get`. Each backend implements `is_running`, so trust
+    -- that over the stale membership in the state list.
     local parts = {}
     local seen = {}
     for _, s in ipairs(states) do
       if s.session and s.session.cwd == target then
         local tool = s.tool
         if tool and tool.name and not seen[tool.name] then
-          seen[tool.name] = true
-          parts[#parts + 1] = cfg.glyph .. tool.name
+          local ok, running = pcall(function()
+            return s.session:is_running()
+          end)
+          local alive = not ok or running ~= false
+          if alive then
+            seen[tool.name] = true
+            parts[#parts + 1] = cfg.glyph .. tool.name
+          end
         end
       end
     end
     if #parts == 0 then
-      return nil
+      done(nil)
+    else
+      done(table.concat(parts, " "))
     end
-    return table.concat(parts, " ")
   end
 end
 

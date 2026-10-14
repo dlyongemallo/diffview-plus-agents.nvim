@@ -4,6 +4,25 @@ local function reset_module()
   package.loaded["diffview-plus-agents.providers.sidekick"] = nil
 end
 
+---Invoke a `fun(entry, done)` provider and return the string it hands to
+---`done`. The sidekick provider still runs synchronously inside its own
+---body, so a one-shot call-and-collect is all we need; a provider that
+---went async with `done` would make this a true helper around a coroutine
+---yield, but the signature here keeps the test-side ergonomics identical.
+---@param fn fun(entry: table?, done: fun(result: string?))
+---@param entry table?
+---@return string?
+local function sync_call(fn, entry)
+  local result
+  local called = false
+  fn(entry, function(r)
+    result = r
+    called = true
+  end)
+  assert.is_true(called)
+  return result
+end
+
 ---Install a fake `sidekick.cli.state` in `package.loaded`. `states` is the
 ---flat list `State.get(filter)` should return regardless of filter shape.
 ---@param states table[]
@@ -19,13 +38,22 @@ local function unstub()
   package.loaded["sidekick.cli.state"] = nil
 end
 
----Shortcut for building a fake sidekick state entry.
+---Shortcut for building a fake sidekick state entry. `alive` defaults
+---to true; pass `false` to simulate a session whose underlying process
+---has exited but whose entry sidekick has not yet cleaned up (the
+---`atime`-debounced close path).
 ---@param tool string
 ---@param cwd string
-local function session(tool, cwd)
+---@param alive? boolean
+local function session(tool, cwd, alive)
   return {
     tool = { name = tool },
-    session = { cwd = vim.fs.normalize(vim.fn.fnamemodify(cwd, ":p")) },
+    session = {
+      cwd = vim.fs.normalize(vim.fn.fnamemodify(cwd, ":p")),
+      is_running = function()
+        return alive ~= false
+      end,
+    },
   }
 end
 
@@ -37,25 +65,25 @@ describe("diffview-plus-agents.providers.sidekick", function()
     reset_module()
     package.loaded["sidekick.cli.state"] = nil
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.is_nil(sidekick.status({ path = "/anything" }))
+    assert.is_nil(sync_call(sidekick.status, { path = "/anything" }))
   end)
 
   it("returns `<glyph><tool-name>` for a session matching the entry", function()
     stub_sidekick({ session("claude", "/my/wt") })
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.equals("●claude", sidekick.status({ path = "/my/wt" }))
+    assert.equals("●claude", sync_call(sidekick.status, { path = "/my/wt" }))
   end)
 
   it("returns nil when no session's cwd matches the entry", function()
     stub_sidekick({ session("claude", "/some/other/wt") })
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.is_nil(sidekick.status({ path = "/my/wt" }))
+    assert.is_nil(sync_call(sidekick.status, { path = "/my/wt" }))
   end)
 
   it("normalises paths so trailing slashes do not break the match", function()
     stub_sidekick({ session("codex", "/my/wt/") })
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.equals("●codex", sidekick.status({ path = "/my/wt" }))
+    assert.equals("●codex", sync_call(sidekick.status, { path = "/my/wt" }))
   end)
 
   it("reports every distinct tool with a session in the same cwd", function()
@@ -64,7 +92,20 @@ describe("diffview-plus-agents.providers.sidekick", function()
       session("codex", "/my/wt"),
     })
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.equals("●claude ●codex", sidekick.status({ path = "/my/wt" }))
+    assert.equals("●claude ●codex", sync_call(sidekick.status, { path = "/my/wt" }))
+  end)
+
+  it("skips sessions whose backend reports `is_running() == false`", function()
+    -- Sidekick's own debounce can keep a terminal in `M.terminals`
+    -- after the agent process has exited, which `State.get` then
+    -- still returns. The provider trusts `is_running` over mere
+    -- membership so a dead agent clears the row immediately.
+    stub_sidekick({
+      session("claude", "/my/wt"),
+      session("agy", "/my/wt", false),
+    })
+    local sidekick = require("diffview-plus-agents.providers.sidekick")
+    assert.equals("●claude", sync_call(sidekick.status, { path = "/my/wt" }))
   end)
 
   it("deduplicates sessions whose tool name matches an earlier session's", function()
@@ -74,22 +115,22 @@ describe("diffview-plus-agents.providers.sidekick", function()
       session("codex", "/my/wt"),
     })
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.equals("●claude ●codex", sidekick.status({ path = "/my/wt" }))
+    assert.equals("●claude ●codex", sync_call(sidekick.status, { path = "/my/wt" }))
   end)
 
   it("is nil-safe for entries that lack a usable path", function()
     stub_sidekick({})
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    assert.is_nil(sidekick.status(nil))
-    assert.is_nil(sidekick.status({}))
-    assert.is_nil(sidekick.status({ path = "" }))
+    assert.is_nil(sync_call(sidekick.status, nil))
+    assert.is_nil(sync_call(sidekick.status, {}))
+    assert.is_nil(sync_call(sidekick.status, { path = "" }))
   end)
 
   it("honours per-call opts: glyph", function()
     stub_sidekick({ session("claude", "/w") })
     local sidekick = require("diffview-plus-agents.providers.sidekick")
     local status = sidekick.setup({ glyph = "*" })
-    assert.equals("*claude", status({ path = "/w" }))
+    assert.equals("*claude", sync_call(status, { path = "/w" }))
   end)
 
   it("calls sidekick's State.get at most once per short render window", function()
@@ -106,7 +147,7 @@ describe("diffview-plus-agents.providers.sidekick", function()
     }
     local sidekick = require("diffview-plus-agents.providers.sidekick")
     for _ = 1, 10 do
-      sidekick.status({ path = "/w" })
+      sync_call(sidekick.status, { path = "/w" })
     end
     assert.equals(1, calls)
   end)
@@ -134,8 +175,8 @@ describe("diffview-plus-agents.providers.sidekick", function()
       end,
     }
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    sidekick.status({ path = "/w" })
-    sidekick.status({ path = "/w" })
+    sync_call(sidekick.status, { path = "/w" })
+    sync_call(sidekick.status, { path = "/w" })
     assert.equals(1, calls)
   end)
 
@@ -148,9 +189,9 @@ describe("diffview-plus-agents.providers.sidekick", function()
       end,
     }
     local sidekick = require("diffview-plus-agents.providers.sidekick")
-    sidekick.status({ path = "/w" })
+    sync_call(sidekick.status, { path = "/w" })
     sidekick._invalidate_cache()
-    sidekick.status({ path = "/w" })
+    sync_call(sidekick.status, { path = "/w" })
     assert.equals(2, calls)
   end)
 end)

@@ -10,12 +10,14 @@ end
 ---@field show_on_enter boolean # Auto-show the agent's pane (sidekick float or tmux window) for the chosen worktree on `<CR>` in the overview.
 ---@field focus_keymap string|false # Normal-mode key that focuses the agent attached to the worktree the user is on (overview row or DiffView tab). For sidekick-launched sessions this shows the float; for sessions discovered in bare tmux panes it `tmux select-window`s to the agent's pane. Set to `false` to skip the mapping.
 ---@field send_keymap string|false # Visual-mode key that sends the current selection to the agent attached to the DiffView's worktree. Set to `false` to skip the mapping.
+---@field follow_attach boolean # On `SidekickCliAttach` for a tmux-backed session (`mux.create = "window"` or `"split"`), `tmux select-pane` to the new pane so the user ends up at the agent after `<leader>as`/`<leader>aa`. For terminal-backed sessions this is a no-op (sidekick's own `focus = true` already handles those).
 
 ---@type DiffviewPlusAgents.Sidekick.Config
 M.DEFAULTS = {
   show_on_enter = true,
   focus_keymap = "<leader>aw",
   send_keymap = "<leader>av",
+  follow_attach = true,
 }
 
 ---Return every sidekick session whose `cwd` matches `path`. Callers can
@@ -176,6 +178,12 @@ local _on_entered
 ---autocmd ids.
 local _au_group = "diffview-plus-agents.sidekick"
 
+---Debounce timer for the `CursorMoved` soft-refresh path. Held at module
+---scope so `cleanup` can shut it down and so rapid cursor movement coalesces
+---into a single trailing refresh instead of one per keystroke.
+---@type uv_timer_t?
+local _debounce_timer
+
 ---Mappings this module installed, each as `{ mode, lhs, callback }`.
 ---`callback` is the exact function we handed to `vim.keymap.set`; we
 ---compare the live mapping against it on cleanup so we only ever remove
@@ -194,6 +202,13 @@ function M.cleanup()
     _on_entered = nil
   end
   pcall(vim.api.nvim_del_augroup_by_name, _au_group)
+  if _debounce_timer then
+    pcall(function()
+      _debounce_timer:stop()
+      _debounce_timer:close()
+    end)
+    _debounce_timer = nil
+  end
   for _, m in ipairs(_mappings) do
     local mode, lhs, callback = m[1], m[2], m[3]
     local current = vim.fn.maparg(lhs, mode, false, true)
@@ -233,36 +248,127 @@ function M.setup(opts)
     DiffviewGlobal.emitter:on("worktree_overview_entered", _on_entered)
   end
 
-  -- Ask the overview to re-score the status column whenever sidekick
-  -- gains or loses a session. The emitted event triggers the view's
-  -- `refresh_status` (status providers only, no git), so a user hitting
-  -- `<leader>aa` to attach a tool sees the row light up without having
-  -- to press `R`. The cache invalidation forces the first provider call
-  -- to do a fresh `State.get` scan; otherwise it would read the stale
-  -- cached list that predates the attach/detach.
-  local function request_status_refresh()
-    require("diffview-plus-agents.providers.sidekick")._invalidate_cache()
+  -- Two refresh paths. HARD events are ones we KNOW change sidekick's
+  -- session set (sidekick itself emitted an attach/detach, or we saw a
+  -- `sidekick_terminal` close): they must bust the provider's TTL cache
+  -- so the row updates immediately. SOFT events are "the user is looking
+  -- at the overview, state MIGHT have changed since the last scan"
+  -- (focus/buffer/window/cursor events): they just ask the overview to
+  -- rerender, and the provider's own 500ms cache coalesces runs that
+  -- fire close together. The split matters on `mux.create = "window"`
+  -- (no `TermClose` fires when an external tmux agent exits) and on
+  -- loaded machines where a `/proc` + `lsof` scan takes seconds: soft
+  -- events then fire freely without triggering a full scan per event.
+  local function emit_refresh()
     pcall(function()
       DiffviewGlobal.emitter:emit("refresh_worktree_overview_status")
     end)
   end
+  local function invalidate_and_refresh()
+    require("diffview-plus-agents.providers.sidekick")._invalidate_cache()
+    emit_refresh()
+  end
+
   local group = vim.api.nvim_create_augroup(_au_group, { clear = true })
+
+  -- Hard events. Attach is split from detach because an attach also
+  -- triggers the "follow a tmux-backed session into its pane" fix for
+  -- `mux.create = "window"` / `"split"`, where sidekick's own
+  -- `focus = true` is a no-op (its focus path short-circuits unless
+  -- `state.terminal` is non-nil, which only ever is for terminal-backed
+  -- sessions). Without this, `<leader>as` or `<leader>a<tool>` launches
+  -- the agent in a backgrounded tmux window (`-d`) and leaves the user
+  -- in nvim. The handler looks up the attached session by its emitted
+  -- `id`, and only acts for a tmux backend -- terminal attaches have
+  -- already been focused by sidekick itself.
   vim.api.nvim_create_autocmd("User", {
     group = group,
-    pattern = { "SidekickCliAttach", "SidekickCliDetach" },
-    callback = request_status_refresh,
-  })
-  -- Also catch externally-discovered sessions (agents started directly in
-  -- a bare tmux pane): sidekick does not emit `SidekickCli*` for those,
-  -- so hook `FocusGained` on the overview buffer as a cheap heartbeat.
-  -- `pattern` matches the view's filetype, so this never fires elsewhere.
-  vim.api.nvim_create_autocmd("FocusGained", {
-    group = group,
-    callback = function()
-      if vim.bo.filetype == "DiffviewWorktreeOverview" then
-        request_status_refresh()
+    pattern = "SidekickCliAttach",
+    callback = function(args)
+      invalidate_and_refresh()
+      if not cfg.follow_attach then
+        return
+      end
+      local id = args and args.data and args.data.id
+      if not id then
+        return
+      end
+      local ok, State = pcall(require, "sidekick.cli.state")
+      if not ok then
+        return
+      end
+      for _, s in ipairs(State.get({ session = id }) or {}) do
+        if s.session and s.session.backend == "tmux" then
+          focus_session(s, true)
+          return
+        end
       end
     end,
+  })
+  vim.api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = "SidekickCliDetach",
+    callback = invalidate_and_refresh,
+  })
+  -- `TermClose` fires only for `mux.create = "terminal"` (sidekick
+  -- spawns an nvim terminal buffer); for `"window"` / `"split"` there
+  -- is no terminal buffer and this path is dormant. On the terminal
+  -- path it fires the moment the agent process exits, which is sooner
+  -- than sidekick's own debounced `SidekickCliDetach`, so the status
+  -- clears without the user having to wait for sidekick to notice.
+  vim.api.nvim_create_autocmd("TermClose", {
+    group = group,
+    pattern = "*",
+    callback = function(args)
+      if vim.bo[args.buf].filetype == "sidekick_terminal" then
+        invalidate_and_refresh()
+      end
+    end,
+  })
+
+  -- Soft events. `BufEnter` + `WinEnter` cover "switched to the overview
+  -- from another buffer or window inside nvim", `FocusGained` covers
+  -- "returned to nvim from another terminal process" (tmux needs
+  -- `set -g focus-events on` to deliver it), `CursorHold` catches the
+  -- idle-on-overview case regardless of focus plumbing, and the
+  -- debounced `CursorMoved` catches the `mux.create = "window"` /
+  -- `"split"` exit case where none of the above fire -- the user comes
+  -- back from a bare tmux window, no event reaches nvim, but any
+  -- navigation on the overview triggers a refresh after a short settle.
+  -- The filetype guard keeps these from firing on unrelated buffers.
+  local function on_overview(fn)
+    return function()
+      if vim.bo.filetype == "DiffviewWorktreeOverview" then
+        fn()
+      end
+    end
+  end
+  vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "WinEnter", "CursorHold" }, {
+    group = group,
+    callback = on_overview(emit_refresh),
+  })
+
+  local DEBOUNCE_MS = 300
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group,
+    callback = on_overview(function()
+      if _debounce_timer then
+        _debounce_timer:stop()
+        _debounce_timer:close()
+      end
+      _debounce_timer = vim.uv.new_timer()
+      _debounce_timer:start(
+        DEBOUNCE_MS,
+        0,
+        vim.schedule_wrap(function()
+          if _debounce_timer then
+            _debounce_timer:close()
+            _debounce_timer = nil
+          end
+          emit_refresh()
+        end)
+      )
+    end),
   })
 
   if cfg.focus_keymap then

@@ -16,7 +16,7 @@ end
 ---Status provider currently registered on the overview, if any. Kept so a
 ---second `setup()` call unregisters the previous one before installing the
 ---new one; otherwise reloading the plugin would stack providers.
----@type (fun(entry: GitAdapter.WorktreeEntry): string?)?
+---@type (fun(entry: GitAdapter.WorktreeEntry, done: fun(result: string?)))?
 M._status_provider = nil
 
 ---Enable or disable each supported tool's integration with diffview+'s

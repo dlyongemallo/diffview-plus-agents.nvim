@@ -6,7 +6,7 @@ function M.root(root)
 end
 
 ---Clone a plugin into the test packpath on first use.
----@param plugin string # Github `owner/repo`.
+---@param plugin string # GitHub `owner/repo`.
 function M.load(plugin)
   local name = plugin:match(".*/(.*)")
   local package_root = M.root(".tests/site/pack/deps/start/")

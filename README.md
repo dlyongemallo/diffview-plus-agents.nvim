@@ -7,7 +7,7 @@ The plugin fills the status column of `:DiffviewWorktreeOverview` with per-workt
 ## Requirements
 
 - Neovim ≥ 0.10.0.
-- [diffview-plus.nvim](https://github.com/dlyongemallo/diffview-plus.nvim) with the worktree overview feature (any build that defines `:DiffviewWorktreeOverview`).
+- [diffview-plus.nvim](https://github.com/dlyongemallo/diffview-plus.nvim) >= 0.39.
 - [sidekick.nvim](https://github.com/folke/sidekick.nvim).
 
 ## Install

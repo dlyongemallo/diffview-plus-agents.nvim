@@ -12,9 +12,28 @@ local function reset_modules()
   end
 end
 
+---Invoke a `fun(entry, done)` provider and return the string it hands to
+---`done`. The sidekick provider still settles `done` inside its own body,
+---so this one-shot call-and-collect wrapper matches the real view's
+---semantics while keeping the test-side ergonomics identical to the old
+---synchronous return.
+---@param fn fun(entry: table?, done: fun(result: string?))
+---@param entry table?
+---@return string?
+local function sync_call(fn, entry)
+  local result
+  local called = false
+  fn(entry, function(r)
+    result = r
+    called = true
+  end)
+  assert.is_true(called)
+  return result
+end
+
 ---Install a fake worktree-overview module in `package.loaded`. Returns the
 ---`registered` list so tests can assert what the plugin registered on it.
----@return (fun(entry: table): string?)[] registered
+---@return (fun(entry: table, done: fun(result: string?)))[] registered
 local function stub_overview()
   local registered = {}
   local overview = {
@@ -115,7 +134,7 @@ describe("diffview-plus-agents setup", function()
     }
 
     require("diffview-plus-agents").setup({ sidekick = { glyph = "*" } })
-    assert.equals("*claude", registered[1]({ path = "/w" }))
+    assert.equals("*claude", sync_call(registered[1], { path = "/w" }))
 
     package.loaded["sidekick.cli.state"] = nil
   end)
@@ -157,8 +176,8 @@ describe("diffview-plus-agents setup", function()
     local invalidated = false
     package.loaded["diffview-plus-agents.providers.sidekick"] = {
       setup = function()
-        return function()
-          return nil
+        return function(_, done)
+          done(nil)
         end
       end,
       _invalidate_cache = function()
@@ -190,8 +209,8 @@ describe("diffview-plus-agents setup", function()
     local _, emits = stub_emitter()
     package.loaded["diffview-plus-agents.providers.sidekick"] = {
       setup = function()
-        return function()
-          return nil
+        return function(_, done)
+          done(nil)
         end
       end,
       _invalidate_cache = function() end,
@@ -203,6 +222,113 @@ describe("diffview-plus-agents setup", function()
     local before = #emits
     vim.api.nvim_exec_autocmds("User", { pattern = "SidekickCliDetach" })
     assert.equals(before, #emits)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  ---Install a provider stub that counts cache invalidations. Reused by
+  ---the "soft vs hard" tests below so each can assert on the counter.
+  local function stub_provider()
+    local state = { invalidations = 0 }
+    package.loaded["diffview-plus-agents.providers.sidekick"] = {
+      setup = function()
+        return function(_, done)
+          done(nil)
+        end
+      end,
+      _invalidate_cache = function()
+        state.invalidations = state.invalidations + 1
+      end,
+    }
+    return state
+  end
+
+  ---Make the current buffer appear as a worktree overview so the
+  ---filetype-guarded autocmds will fire. Returns the buffer so tests
+  ---can clean up or reference it later.
+  local function make_overview_buffer()
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(buf)
+    vim.bo[buf].filetype = "DiffviewWorktreeOverview"
+    return buf
+  end
+
+  it("soft-refreshes on `BufEnter` without invalidating the provider cache", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local provider = stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    local before = #emits
+    make_overview_buffer()
+    vim.api.nvim_exec_autocmds("BufEnter", {})
+
+    assert.is_true(#emits > before)
+    assert.equals(0, provider.invalidations)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("ignores `BufEnter` on unrelated buffers", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(buf)
+    vim.bo[buf].filetype = "lua"
+
+    local before = #emits
+    vim.api.nvim_exec_autocmds("BufEnter", {})
+    assert.equals(before, #emits)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("soft-refreshes on `WinEnter` and `FocusGained` on the overview", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local provider = stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    make_overview_buffer()
+
+    local before = #emits
+    vim.api.nvim_exec_autocmds("WinEnter", {})
+    assert.is_true(#emits > before)
+    before = #emits
+    vim.api.nvim_exec_autocmds("FocusGained", {})
+    assert.is_true(#emits > before)
+
+    -- Neither soft trigger invalidates the TTL cache; the provider's
+    -- own 500ms window coalesces repeat events.
+    assert.equals(0, provider.invalidations)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("debounces `CursorMoved` into a single trailing soft refresh", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local provider = stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    make_overview_buffer()
+
+    local before = #emits
+    for _ = 1, 5 do
+      vim.api.nvim_exec_autocmds("CursorMoved", {})
+    end
+    -- Immediately after the burst, nothing has fired yet.
+    assert.equals(before, #emits)
+    -- After the debounce window plus a small slack, exactly one soft
+    -- refresh has arrived for the whole burst.
+    vim.wait(500, function()
+      return #emits > before
+    end)
+    assert.equals(before + 1, #emits)
+    assert.equals(0, provider.invalidations)
 
     package.loaded["diffview-plus-agents.providers.sidekick"] = nil
   end)
