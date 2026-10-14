@@ -225,4 +225,197 @@ describe("diffview-plus-agents setup", function()
 
     package.loaded["diffview-plus-agents.providers.sidekick"] = nil
   end)
+
+  ---Install a provider stub that counts cache invalidations. Reused by
+  ---the "soft vs hard" tests below so each can assert on the counter.
+  local function stub_provider()
+    local state = { invalidations = 0 }
+    package.loaded["diffview-plus-agents.providers.sidekick"] = {
+      setup = function()
+        return function(_, done)
+          done(nil)
+        end
+      end,
+      _invalidate_cache = function()
+        state.invalidations = state.invalidations + 1
+      end,
+    }
+    return state
+  end
+
+  ---Make the current buffer appear as a worktree overview so the
+  ---filetype-guarded autocmds will fire. Returns the buffer so tests
+  ---can clean up or reference it later.
+  local function make_overview_buffer()
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(buf)
+    vim.bo[buf].filetype = "DiffviewWorktreeOverview"
+    return buf
+  end
+
+  it("soft-refreshes on `BufEnter` without invalidating the provider cache", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local provider = stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    local before = #emits
+    make_overview_buffer()
+    vim.api.nvim_exec_autocmds("BufEnter", {})
+
+    assert.is_true(#emits > before)
+    assert.equals(0, provider.invalidations)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("ignores `BufEnter` on unrelated buffers", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(buf)
+    vim.bo[buf].filetype = "lua"
+
+    local before = #emits
+    vim.api.nvim_exec_autocmds("BufEnter", {})
+    assert.equals(before, #emits)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("soft-refreshes on `WinEnter` and `FocusGained` on the overview", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local provider = stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    make_overview_buffer()
+
+    local before = #emits
+    vim.api.nvim_exec_autocmds("WinEnter", {})
+    assert.is_true(#emits > before)
+    before = #emits
+    vim.api.nvim_exec_autocmds("FocusGained", {})
+    assert.is_true(#emits > before)
+
+    -- Neither soft trigger invalidates the TTL cache; the provider's
+    -- own 500ms window coalesces repeat events.
+    assert.equals(0, provider.invalidations)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("debounces `CursorMoved` into a single trailing soft refresh", function()
+    stub_overview()
+    local _, emits = stub_emitter()
+    local provider = stub_provider()
+
+    require("diffview-plus-agents").setup({ sidekick = {} })
+    make_overview_buffer()
+
+    local before = #emits
+    for _ = 1, 5 do
+      vim.api.nvim_exec_autocmds("CursorMoved", {})
+    end
+    -- Immediately after the burst, nothing has fired yet.
+    assert.equals(before, #emits)
+    -- After the debounce window plus a small slack, exactly one soft
+    -- refresh has arrived for the whole burst.
+    vim.wait(500, function()
+      return #emits > before
+    end)
+    assert.equals(before + 1, #emits)
+    assert.equals(0, provider.invalidations)
+
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+  end)
+
+  it("pins the overview tab's cwd to the worktree under the cursor", function()
+    -- Why this exists: sidekick's `Session.new` reads `vim.fn.getcwd(0)`
+    -- at attach time with no plumbing for the caller to override it, so
+    -- `<leader>as` on the overview launches the new agent in whichever
+    -- cwd the overview tab happens to carry. Pinning the tab's cwd to
+    -- the row under the cursor on every move keeps those launches
+    -- attached to the right worktree.
+    stub_overview()
+    stub_emitter()
+    stub_provider()
+
+    local tmp = vim.fn.tempname()
+    vim.fn.mkdir(tmp, "p")
+    local original_cwd = vim.fn.getcwd()
+    local win = vim.api.nvim_get_current_win()
+
+    package.loaded["diffview.lib"] = {
+      get_current_view = function()
+        return {
+          _visible_entries = { { path = tmp } },
+          winid = win,
+          adapter = { ctx = { toplevel = tmp } },
+        }
+      end,
+    }
+
+    local ok, err = pcall(function()
+      require("diffview-plus-agents").setup({ sidekick = {} })
+      make_overview_buffer()
+      -- The autocmd group fires `_sync_tab_cwd` on CursorMoved; drive
+      -- it directly rather than racing a real cursor move.
+      require("diffview-plus-agents.sidekick")._sync_tab_cwd()
+
+      assert.equals(vim.fs.normalize(tmp), vim.fs.normalize(vim.fn.getcwd()))
+    end)
+
+    -- Restore cwd so the next test does not inherit our tcd. `tcd -` is
+    -- not a thing; the simplest reset is `cd` to the original path.
+    pcall(vim.cmd.tcd, vim.fn.fnameescape(original_cwd))
+    pcall(vim.fn.delete, tmp, "rf")
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+    package.loaded["diffview.lib"] = nil
+
+    if not ok then
+      error(err)
+    end
+  end)
+
+  it("leaves tab cwd alone when `sync_tab_cwd = false`", function()
+    stub_overview()
+    stub_emitter()
+    stub_provider()
+
+    local tmp = vim.fn.tempname()
+    vim.fn.mkdir(tmp, "p")
+    local original_cwd = vim.fn.getcwd()
+    local win = vim.api.nvim_get_current_win()
+
+    package.loaded["diffview.lib"] = {
+      get_current_view = function()
+        return {
+          _visible_entries = { { path = tmp } },
+          winid = win,
+          adapter = { ctx = { toplevel = tmp } },
+        }
+      end,
+    }
+
+    local ok, err = pcall(function()
+      require("diffview-plus-agents").setup({ sidekick = { sync_tab_cwd = false } })
+      make_overview_buffer()
+      local before = vim.fn.getcwd()
+      vim.api.nvim_exec_autocmds("CursorMoved", {})
+      assert.equals(before, vim.fn.getcwd())
+    end)
+
+    pcall(vim.cmd.tcd, vim.fn.fnameescape(original_cwd))
+    pcall(vim.fn.delete, tmp, "rf")
+    package.loaded["diffview-plus-agents.providers.sidekick"] = nil
+    package.loaded["diffview.lib"] = nil
+
+    if not ok then
+      error(err)
+    end
+  end)
 end)
