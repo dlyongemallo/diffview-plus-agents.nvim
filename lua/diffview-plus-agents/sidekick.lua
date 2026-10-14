@@ -376,15 +376,22 @@ function M.setup(opts)
         _debounce_timer:stop()
         _debounce_timer:close()
       end
-      _debounce_timer = vim.uv.new_timer()
-      _debounce_timer:start(
+      -- Capture the fresh timer in the closure so a scheduled callback
+      -- from a previous timer -- `vim.schedule_wrap` may land AFTER the
+      -- autocmd has already stopped+closed+replaced it -- cannot close
+      -- the current timer or emit an extra refresh. The guard trips when
+      -- `_debounce_timer` has been swapped out underneath this callback.
+      local this = vim.uv.new_timer()
+      _debounce_timer = this
+      this:start(
         DEBOUNCE_MS,
         0,
         vim.schedule_wrap(function()
-          if _debounce_timer then
-            _debounce_timer:close()
-            _debounce_timer = nil
+          if _debounce_timer ~= this then
+            return
           end
+          this:close()
+          _debounce_timer = nil
           emit_refresh()
         end)
       )
