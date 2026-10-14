@@ -240,7 +240,9 @@ function M.cleanup()
 end
 
 ---Install a keymap and remember both its coordinates and callback so
----`cleanup` can tell whether we still own the live binding.
+---`cleanup` can tell whether we still own the live binding. `rhs` MUST
+---be a function: cleanup compares it against `maparg(..., {..., true}).callback`,
+---and a string rhs would never match that field.
 local function install_keymap(mode, lhs, rhs, opts)
   vim.keymap.set(mode, lhs, rhs, opts)
   _mappings[#_mappings + 1] = { mode, lhs, rhs }
