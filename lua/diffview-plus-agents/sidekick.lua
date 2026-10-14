@@ -267,6 +267,21 @@ function M.setup(opts)
       end
     end,
   })
+  -- `SidekickCliDetach` fires when sidekick itself notices a dead
+  -- session, but sidekick only notices on its next `State.get` or on
+  -- an explicit window close -- not when the agent process exits in
+  -- a terminal whose window the user leaves open. Hook `TermClose`
+  -- on sidekick's terminal buffers directly so our refresh fires the
+  -- moment the agent exits, independent of sidekick's own cleanup.
+  vim.api.nvim_create_autocmd("TermClose", {
+    group = group,
+    pattern = "*",
+    callback = function(args)
+      if vim.bo[args.buf].filetype == "sidekick_terminal" then
+        request_status_refresh()
+      end
+    end,
+  })
 
   if cfg.focus_keymap then
     install_keymap("n", cfg.focus_keymap, function()
