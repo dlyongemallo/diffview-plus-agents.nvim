@@ -17,7 +17,12 @@ end
 ---so this one-shot call-and-collect wrapper matches the real view's
 ---semantics while keeping the test-side ergonomics identical to the old
 ---synchronous return.
----@param fn fun(entry: table?, done: fun(result: string?))
+---Call a `fun(entry, done)` status provider and flatten the segment-list
+---payload it hands to `done` into a plain string. The provider emits
+---segment lists per the diffview-plus status contract; the setup spec
+---only cares about rendered text, so collapse here instead of pushing
+---the shape awareness into every assertion.
+---@param fn fun(entry: table?, done: fun(result: any))
 ---@param entry table?
 ---@return string?
 local function sync_call(fn, entry)
@@ -28,7 +33,14 @@ local function sync_call(fn, entry)
     called = true
   end)
   assert.is_true(called)
-  return result
+  if result == nil then
+    return nil
+  end
+  local parts = {}
+  for _, seg in ipairs(result) do
+    parts[#parts + 1] = seg.text
+  end
+  return table.concat(parts)
 end
 
 ---Install a fake worktree-overview module in `package.loaded`. Returns the
