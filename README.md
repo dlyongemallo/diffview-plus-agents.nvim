@@ -31,12 +31,40 @@ With `lazy.nvim`:
 require("diffview-plus-agents").setup({
   sidekick = {
     glyph         = "●",             -- prefix in the status column (e.g., `●claude`)
+    glyph_hl      = "DiffviewNonText", -- highlight group for the glyph; `false` to use the status column's default
     show_on_enter = true,            -- auto-show the agent pane on <CR> in the overview
     focus_keymap  = "<leader>aw",    -- focus the worktree's agent (false to skip)
     send_keymap   = "<leader>av",    -- send the current visual selection (false to skip)
+    show_model    = false,           -- append `:<model>` after the tool name (see below)
+    show_effort   = false,           -- append `:<effort>` after the model (when both are known)
   },
 })
 ```
+
+### Showing the model (and optionally effort)
+
+With `show_model = true`, the status column renders `<glyph><tool>:<model>` (e.g., `●codex:gpt-5`). Add `show_effort = true` to also append the reasoning-effort setting where the agent surfaces it (`●codex:gpt-5:high`). The feature is off by default; enabling it is additive and the row keeps collapsing back to `<glyph><tool>` for any session whose model cannot be resolved.
+
+`show_model` accepts a boolean shorthand or an explicit subtable:
+
+| Value | Sources used | Catches a mid-session `/model` switch? |
+|---|---|---|
+| `false` (default) | none | none |
+| `true` → `{ enabled = true, live = false }` | argv + env | no (launch-time only) |
+| `{ enabled = true, live = true }` | pane + argv + env | yes (tmux backend only) |
+
+Sources, in precedence order (pane wins over argv/env/config when enabled):
+
+1. **argv**: reads the running agent's `/proc/<pid>/cmdline` for flags like `--model <name>` / `-m <name>` (claude/codex/copilot/agy), `--effort <level>` (claude/agy), and `--reasoning-effort <v>` / `-c model_reasoning_effort=<v>` (codex). Launch-time only.
+2. **env**: reads `/proc/<pid>/environ` (via `sidekick.cli.procs.env`) for `ANTHROPIC_MODEL` and friends. Launch-time only.
+3. **config** (claude only today): reads `effortLevel` from `~/.claude/settings.json`, with a per-worktree `<cwd>/.claude/settings.json` overlaying it. This is the only signal when the user launched bare and relies on claude's own settings file.
+4. **pane** (opt-in via `live = true`): scrapes the tmux pane via `session:dump()` and parses a per-tool regex against the TUI footer. Only works for the `tmux` backend, and only against the last ~30 lines of the pane (so scrollback mentions do not win over the current status). When the pane yields a model, it is treated as authoritative: launch-time sources are not consulted for effort, since mixing a live model with a launch-time effort would lie about the agent's current state.
+
+Caveats:
+
+- The feature covers `claude`, `codex`, `copilot`, and `antigravity` (rendered as `agy` in the status column). `copilot` ships with a stub argv parser; contributors adding real flag conventions should extend `lua/diffview-plus-agents/providers/model.lua`.
+- Windows: the resolver has no `/proc` and no `ps`, so it silently returns nothing and the row falls back to `<glyph><tool>`.
+- Model names are collapsed by a built-in shortener: `claude-sonnet-4-5-20251022` → `sonnet-4.5`; agy's human-readable `Gemini 4 Neon` → `neon`; identifiers the rules do not touch pass through unchanged.
 
 A single `sidekick` block controls both the status column and the pairing keymaps. Passing `sidekick = {}` enables everything with defaults; omitting the key leaves the plugin inert and tears down any previously installed handlers (useful across `setup` reloads).
 

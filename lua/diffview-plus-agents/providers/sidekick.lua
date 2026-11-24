@@ -1,12 +1,34 @@
 local M = {}
 
 ---@class SidekickProviderConfig
----@field glyph string # Prefix rendered before the CLI tool's name (e.g., `●claude`).
+---@field glyph? string # Prefix rendered before the CLI tool's name (e.g., `●claude`).
+---@field glyph_hl? string|false # Highlight group for the glyph. Defaults to `DiffviewNonText`, matching the overview's own chrome punctuation so the glyph recedes visually alongside the model/effort label; set to `false` to render the glyph with the status column's default highlight instead.
+---@field show_model? boolean|table # Append `:<model>` after the tool name. `true` is shorthand for `{ enabled = true, live = false }`; the subtable adds `live = true` to also scrape the tmux pane for a model the user may have switched to mid-session.
+---@field show_effort? boolean # Append `:<effort>` after the model (when both are known). Ignored when `show_model` is off or the resolver cannot determine a model.
 
 ---@type SidekickProviderConfig
 M.DEFAULTS = {
   glyph = "●",
+  glyph_hl = "DiffviewNonText",
+  show_model = false,
+  show_effort = false,
 }
+
+---Normalize the `show_model` config into a `{ enabled, live }` table. Users
+---may pass `false`/nil to disable, `true` as shorthand for enabled + launch-
+---time only, or the explicit subtable. Keeping the shape uniform means the
+---hot path at render time is a pair of field reads rather than a type check.
+---@param v boolean|table|nil
+---@return { enabled: boolean, live: boolean }
+local function normalize_show_model(v)
+  if v == true then
+    return { enabled = true, live = false }
+  end
+  if type(v) == "table" then
+    return { enabled = v.enabled == true, live = v.live == true }
+  end
+  return { enabled = false, live = false }
+end
 
 ---How long a cached `State.get` result is reused, measured from the
 ---scan's completion. A worktree overview renders every row in a single
@@ -41,10 +63,16 @@ local function get_states()
 end
 
 ---Drop the cached session list. Tests use this to isolate cases that
----stub a new `State.get` behaviour between invocations.
+---stub a new `State.get` behaviour between invocations. Also purges the
+---model resolver's per-session cache so stale `(model, effort)` entries
+---never outlive the session they were resolved from.
 function M._invalidate_cache()
   _cache_states = nil
   _cache_stamp_ms = 0
+  local ok, model = pcall(require, "diffview-plus-agents.providers.model")
+  if ok and type(model._invalidate_cache) == "function" then
+    model._invalidate_cache()
+  end
 end
 
 ---Normalise a path the same way `sidekick.cli.Session` does, so the equality
@@ -75,6 +103,12 @@ end
 ---@return fun(entry: GitAdapter.WorktreeEntry, done: fun(result: string?))
 function M.setup(opts)
   local cfg = vim.tbl_deep_extend("force", M.DEFAULTS, opts or {})
+  local show_model = normalize_show_model(cfg.show_model)
+  local resolver_opts = { live = show_model.live }
+  -- `glyph_hl = false` is the escape hatch for users who want the glyph
+  -- to pick up the status column's default highlight alongside the label;
+  -- `or nil` collapses both `false` and `nil` so the segment omits the key.
+  local glyph_hl = cfg.glyph_hl or nil
 
   return function(entry, done)
     if not entry or not entry.path or entry.path == "" then
@@ -102,27 +136,55 @@ function M.setup(opts)
     -- terminal lingers in `M.terminals` and keeps showing up in
     -- `State.get`. Each backend implements `is_running`, so trust
     -- that over the stale membership in the state list.
-    local parts = {}
+    -- Build the row as `{ glyph, label }` pairs per matching session,
+    -- plus a `" "` separator between sessions. On older diffview-plus
+    -- the segments are flattened into a plain string before dispatch.
+    local segments = {}
     local seen = {}
     for _, s in ipairs(states) do
-      if s.session and s.session.cwd == target then
-        local tool = s.tool
-        if tool and tool.name and not seen[tool.name] then
-          local ok, running = pcall(function()
-            return s.session:is_running()
-          end)
-          local alive = not ok or running ~= false
-          if alive then
-            seen[tool.name] = true
-            parts[#parts + 1] = cfg.glyph .. tool.name
+      local tool = s.tool
+      if
+        not s.session
+        or s.session.cwd ~= target
+        or not tool
+        or not tool.name
+        or seen[tool.name]
+      then
+        goto continue
+      end
+      local ok, running = pcall(function()
+        return s.session:is_running()
+      end)
+      if ok and running == false then
+        goto continue
+      end
+      seen[tool.name] = true
+      -- Sidekick names the tool `antigravity` (matching its upstream module
+      -- path), but the binary is `agy` and the status column has very
+      -- little room; render the shorter form so it does not dominate the
+      -- row. Other tool names already read as the CLI name.
+      local label = tool.name == "antigravity" and "agy" or tool.name
+      if show_model.enabled then
+        local info =
+          require("diffview-plus-agents.providers.model").resolve(s.session, resolver_opts)
+        if info.model then
+          label = label .. ":" .. info.model
+          if cfg.show_effort and info.effort then
+            label = label .. ":" .. info.effort
           end
         end
       end
+      if #segments > 0 then
+        segments[#segments + 1] = { text = " " }
+      end
+      segments[#segments + 1] = { text = cfg.glyph, hl = glyph_hl }
+      segments[#segments + 1] = { text = label }
+      ::continue::
     end
-    if #parts == 0 then
+    if #segments == 0 then
       done(nil)
     else
-      done(table.concat(parts, " "))
+      done(segments)
     end
   end
 end
